@@ -3,10 +3,11 @@
 
   const Q = window.QUESTIONS || [];
   const RANKS = 3;
-  const STORE_KEY = "kachikan-ranking-v2";
+  const STORE_KEY = "kachikan-ranking-v3";
   const app = document.getElementById("app");
+  const CATS = [...new Set(Q.map((q) => q.cat || "その他"))];
 
-  // めくったあとに話すこと（お題ごとに順番に出す）
+  // めくったあとに話すこと（お題の番号で順番に出す）
   const TALK = {
     answer: [
       "1位を選んだ理由は？",
@@ -31,12 +32,14 @@
     screen: "home",
     me: "",
     friend: "",
-    firstRole: "answer",
-    q: 0,
+    firstRole: "answer", // 最初の役。以降は1問ごとに交代
+    cat: "all",          // 一覧の絞り込み
+    q: null,             // いま遊んでいるお題の番号（0始まり）
+    role: "answer",      // いまのお題での役
     picks: [],
     revealed: 0,
     hits: null,
-    history: []
+    history: []          // { q, role, picks, hits }
   });
 
   let S = load() || fresh();
@@ -53,7 +56,10 @@
 
   const meName = () => S.me.trim() || "あなた";
   const friendName = () => S.friend.trim() || "相手";
-  const roleAt = (i) => (i % 2 === 0 ? S.firstRole : (S.firstRole === "answer" ? "guess" : "answer"));
+  const other = (r) => (r === "answer" ? "guess" : "answer");
+  const nextDefaultRole = () => (S.history.length % 2 === 0 ? S.firstRole : other(S.firstRole));
+  const played = () => new Set(S.history.map((h) => h.q));
+  const inCat = (i) => S.cat === "all" || Q[i].cat === S.cat;
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const buzz = (ms) => { try { if (navigator.vibrate && navigator.userActivation && navigator.userActivation.hasBeenActive) navigator.vibrate(ms); } catch (e) {} };
 
@@ -64,30 +70,49 @@
     window.scrollTo(0, 0);
   }
 
+  function startQuestion(i) {
+    Object.assign(S, { q: i, role: nextDefaultRole(), picks: [], revealed: 0, hits: null });
+    go("question");
+  }
+
+  function randomQuestion() {
+    const done = played();
+    const all = Q.map((_, i) => i).filter(inCat);
+    const fresh = all.filter((i) => !done.has(i));
+    const list = fresh.length ? fresh : all;
+    startQuestion(list[Math.floor(Math.random() * list.length)]);
+  }
+
   // ---------- 画面 ----------
   function render() {
     app.classList.toggle("no-dock", S.screen !== "question");
-    if (S.screen === "question") return renderQuestion();
-    if (S.screen === "reveal") return renderReveal();
+    if (S.screen === "list") return renderList();
+    if (S.screen === "question" && Q[S.q]) return renderQuestion();
+    if (S.screen === "reveal" && Q[S.q]) return renderReveal();
     if (S.screen === "result") return renderResult();
     return renderHome();
   }
 
   function renderHome() {
-    const canResume = S.history.length > 0 && S.history.length < Q.length;
+    const n = S.history.length;
     app.innerHTML = `
-      <header class="home-head">
+      <header class="hero">
+        <svg class="fan" viewBox="0 0 168 112" aria-hidden="true">
+          <g transform="rotate(-18 84 160)"><rect x="56" y="12" width="56" height="80" rx="8" class="c3"/><text x="64" y="32" class="cn">3</text></g>
+          <g transform="rotate(18 84 160)"><rect x="56" y="12" width="56" height="80" rx="8" class="c2"/><text x="104" y="32" class="cn" text-anchor="end">2</text></g>
+          <g><rect x="56" y="6" width="56" height="80" rx="8" class="c1"/><text x="64" y="26" class="cn">1</text><text x="84" y="58" class="cq">?</text></g>
+        </svg>
         <h1>価値観ランキング</h1>
-        <p>8つの選択肢から1〜3位を選び、同時にめくって見せ合う2人用のゲームです。</p>
+        <p>1〜3位を選んで、同時にめくる。<br>相手の答え、当てられる？</p>
       </header>
 
       <section class="section">
         <h2>あそびかた</h2>
         <ol class="steps">
-          <li>2人とも、自分のスマホでこのページを開きます。</li>
-          <li>答える人は自分の本音で、当てる人は相手の答えを予想して、1〜3位を選びます。</li>
-          <li>2人とも選び終わったら、声をそろえて3位、2位、1位の順にめくります。</li>
-          <li>選んだ理由を話し、当たった数を記録します。役はお題ごとに交代します。</li>
+          <li>2人とも自分のスマホでこのページを開く</li>
+          <li>同じお題を選ぶ（番号を伝え合う）</li>
+          <li>答える人は本音で、当てる人は相手を予想して1〜3位を選ぶ</li>
+          <li>3位→2位→1位の順に同時にめくって、理由を話す</li>
         </ol>
       </section>
 
@@ -108,22 +133,25 @@
 
       <section class="section">
         <fieldset class="radios">
-          <legend>1問目のあなたの役</legend>
-          <label class="radio">
-            <input type="radio" name="role" value="answer" ${S.firstRole === "answer" ? "checked" : ""}>
-            <span><b>答える人</b><small>自分の本音で順位をつける</small></span>
-          </label>
-          <label class="radio">
-            <input type="radio" name="role" value="guess" ${S.firstRole === "guess" ? "checked" : ""}>
-            <span><b>当てる人</b><small>相手がつける順位を予想する</small></span>
-          </label>
+          <legend>最初のあなたの役</legend>
+          <div class="role-opts">
+            <label class="radio">
+              <input type="radio" name="role" value="answer" ${S.firstRole === "answer" ? "checked" : ""}>
+              <b>答える人</b><small>自分の本音で順位をつける</small>
+            </label>
+            <label class="radio">
+              <input type="radio" name="role" value="guess" ${S.firstRole === "guess" ? "checked" : ""}>
+              <b>当てる人</b><small>相手の順位を予想する</small>
+            </label>
+          </div>
         </fieldset>
-        <p class="hint">相手とは別の役を選んでください。2問目からは自動で入れかわります。</p>
+        <p class="hint">相手とは別の役にしてください。1問ごとに自動で入れかわり、お題の画面でも変えられます。</p>
       </section>
 
       <div class="start">
-        ${canResume ? `<button class="btn" id="resume">${S.history.length + 1}問目から続ける</button>` : ""}
-        <button class="btn ${canResume ? "outline" : ""}" id="start">${canResume ? "最初からはじめる" : "はじめる"}</button>
+        <button class="btn" id="pick">お題を選ぶ</button>
+        <button class="btn outline" id="random">ランダムで1問</button>
+        ${n ? `<div class="center"><button class="text-btn" id="result">これまでの結果（${n}問）</button></div>` : ""}
       </div>
     `;
 
@@ -134,52 +162,90 @@
     app.querySelectorAll('input[name="role"]').forEach((r) => {
       r.addEventListener("change", () => { S.firstRole = r.value; save(); });
     });
-
-    app.querySelector("#start").addEventListener("click", () => {
-      Object.assign(S, { q: 0, picks: [], revealed: 0, hits: null, history: [] });
-      go("question");
-    });
-    const resume = app.querySelector("#resume");
-    if (resume) resume.addEventListener("click", () => {
-      Object.assign(S, { q: S.history.length, picks: [], revealed: 0, hits: null });
-      go("question");
-    });
+    app.querySelector("#pick").addEventListener("click", () => go("list"));
+    app.querySelector("#random").addEventListener("click", randomQuestion);
+    const res = app.querySelector("#result");
+    if (res) res.addEventListener("click", () => go("result"));
   }
 
-  function meta() {
-    const role = roleAt(S.q);
-    const roleText = role === "answer" ? `${esc(meName())}が答える番` : `${esc(meName())}が当てる番`;
+  function renderList() {
+    const done = played();
+    const items = Q.map((q, i) => ({ q, i })).filter(({ i }) => inCat(i));
+    app.innerHTML = `
+      <div class="list-head">
+        <button class="text-btn" id="home">← トップ</button>
+        <h1>お題を選ぶ</h1>
+        <p class="sub">相手と同じ番号のお題を選んでください。${done.size ? "遊んだお題には「済」がつきます。" : ""}</p>
+      </div>
+
+      <div class="chips" role="group" aria-label="カテゴリで絞り込む">
+        <button class="chip" data-cat="all" aria-pressed="${S.cat === "all"}">すべて</button>
+        ${CATS.map((c) => `<button class="chip" data-cat="${esc(c)}" aria-pressed="${S.cat === c}">${esc(c)}</button>`).join("")}
+      </div>
+
+      <button class="btn outline random-btn" id="random">${S.cat === "all" ? "ランダムで1問" : `「${esc(S.cat)}」からランダムで1問`}</button>
+
+      <ul class="qlist">
+        ${items.map(({ q, i }) => `
+          <li><button class="qrow ${done.has(i) ? "done" : ""}" data-i="${i}">
+            <span class="no">No.${i + 1}</span>
+            <span class="qt">${esc(q.title)}<small>${esc(q.cat || "")}</small></span>
+            ${done.has(i) ? `<span class="mark">済</span>` : ""}
+          </button></li>`).join("")}
+      </ul>
+    `;
+
+    app.querySelector("#home").addEventListener("click", () => go("home"));
+    app.querySelector("#random").addEventListener("click", randomQuestion);
+    app.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => {
+      S.cat = c.dataset.cat;
+      save();
+      renderList();
+    }));
+    app.querySelectorAll(".qrow").forEach((b) => b.addEventListener("click", () => startQuestion(Number(b.dataset.i))));
+  }
+
+  // お題カード（青い面）。お題画面とめくる画面で共通
+  function qCard(sub, canSwitch) {
+    const q = Q[S.q];
+    const roleBox = canSwitch
+      ? `<div class="role-switch" role="group" aria-label="このお題での${esc(meName())}の役">
+          <button data-r="answer" aria-pressed="${S.role === "answer"}">答える</button>
+          <button data-r="guess" aria-pressed="${S.role === "guess"}">当てる</button>
+        </div>`
+      : `<span class="role-tag">${S.role === "answer" ? "答える番" : "当てる番"}</span>`;
     return `
-      <div class="q-meta"><span>お題 <b>${S.q + 1}</b> / ${Q.length}</span><b>${roleText}</b></div>
-      <div class="progress" aria-hidden="true"><span style="width:${((S.q + 1) / Q.length) * 100}%"></span></div>
+      <div class="q-card">
+        <div class="q-meta">
+          <span class="q-no"><b>No.${S.q + 1}</b>${esc(q.cat || "")}</span>
+          ${roleBox}
+        </div>
+        <h2>${esc(q.title)}</h2>
+        ${sub ? `<p>${sub}</p>` : ""}
+      </div>
     `;
   }
 
   function renderQuestion() {
     const item = Q[S.q];
-    const role = roleAt(S.q);
-    const sub = role === "answer"
-      ? "本音で、1位から順にタップします。"
-      : `${esc(friendName())}が選びそうな順に、1位からタップします。`;
+    const sub = S.role === "answer"
+      ? `${esc(meName())}の本音で、1位から順にタップ。`
+      : `${esc(friendName())}が選びそうな順に、1位からタップ。`;
     const left = RANKS - S.picks.length;
 
     app.innerHTML = `
-      ${meta()}
-      <div class="q-head">
-        <h2>${esc(item.title)}</h2>
-        <p class="sub">${sub}</p>
-      </div>
+      ${qCard(sub, true)}
       <ul class="opts">
         ${item.options.map((t, i) => {
           const r = S.picks.indexOf(i);
           return `<li><button class="opt ${r >= 0 ? "picked" : ""}" data-i="${i}" aria-pressed="${r >= 0}">
+            <span class="rank">${r >= 0 ? `${r + 1}<small>位</small>` : ""}</span>
             <span class="label">${esc(t)}</span>
-            <span class="rank">${r >= 0 ? `${r + 1}位` : "&nbsp;"}</span>
           </button></li>`;
         }).join("")}
       </ul>
-      <p class="sub" style="margin-top:12px">選んだものをもう一度タップすると取り消せます。</p>
-      <div class="back-home"><button class="text-btn" id="home">トップに戻る</button></div>
+      <p class="sub undo-hint">選んだものをもう一度タップすると取り消せます。</p>
+      <div class="back-home"><button class="text-btn" id="back">← お題の一覧に戻る</button></div>
 
       <div class="dock"><div class="dock-inner">
         <ol class="picked-list" aria-label="選んだ順位">
@@ -194,6 +260,14 @@
       </div></div>
     `;
 
+    const rerender = (focusSel) => {
+      const y = window.scrollY;
+      renderQuestion();
+      window.scrollTo(0, y);
+      const el = focusSel && app.querySelector(focusSel);
+      if (el) el.focus({ preventScroll: true });
+    };
+
     app.querySelectorAll(".opt").forEach((b) => {
       b.addEventListener("click", () => {
         const i = Number(b.dataset.i);
@@ -203,11 +277,14 @@
         else return;
         buzz(10);
         save();
-        const y = window.scrollY;
-        renderQuestion();
-        window.scrollTo(0, y);
-        const again = app.querySelector(`.opt[data-i="${i}"]`);
-        if (again) again.focus({ preventScroll: true });
+        rerender(`.opt[data-i="${i}"]`);
+      });
+    });
+    app.querySelectorAll(".role-switch button").forEach((b) => {
+      b.addEventListener("click", () => {
+        S.role = b.dataset.r;
+        save();
+        rerender(`.role-switch [data-r="${S.role}"]`);
       });
     });
     app.querySelector("#next").addEventListener("click", () => {
@@ -215,23 +292,19 @@
       S.hits = null;
       go("reveal");
     });
-    app.querySelector("#home").addEventListener("click", () => go("home"));
+    app.querySelector("#back").addEventListener("click", () => go("list"));
   }
 
   function renderReveal() {
     const item = Q[S.q];
-    const role = roleAt(S.q);
+    const role = S.role;
     const done = S.revealed >= RANKS;
     const nextRank = RANKS - S.revealed; // 3 → 2 → 1
     const talk = TALK[role][S.q % TALK[role].length];
     const guesser = role === "guess" ? meName() : friendName();
-    const isLast = S.q === Q.length - 1;
 
     app.innerHTML = `
-      ${meta()}
-      <div class="reveal-head">
-        <h2>${esc(item.title)}</h2>
-      </div>
+      ${qCard("", false)}
       <p class="status" role="status">${done
         ? "3つともめくりました。"
         : `相手と同時に、<b>${nextRank}位</b>をめくります。`}</p>
@@ -242,12 +315,18 @@
           const open = rank > RANKS - S.revealed;
           const isNext = !done && rank === nextRank;
           return `<li class="${rank === 1 ? "first" : ""}">
-            <span class="pos">${rank}位</span>
             <button class="flip ${open ? "open" : ""} ${isNext ? "next" : ""}" data-rank="${rank}" ${isNext ? "" : "disabled"}
               aria-label="${open ? `${rank}位 ${esc(label)}` : isNext ? `${rank}位をめくる` : `${rank}位（まだめくれません）`}">
               <span class="inner">
-                <span class="face back">${isNext ? "タップしてめくる" : open ? "" : "裏向き"}</span>
-                <span class="face front">${esc(label)}</span>
+                <span class="face back">
+                  <span class="idx">${rank}<small>位</small></span>
+                  <span class="hint-text">${isNext ? "タップしてめくる" : ""}</span>
+                  <span class="idx end">${rank}</span>
+                </span>
+                <span class="face front">
+                  <span class="idx">${rank}<small>位</small></span>
+                  <span class="txt">${esc(label)}</span>
+                </span>
               </span>
             </button>
           </li>`;
@@ -256,8 +335,10 @@
 
       ${done ? `
         <section class="after">
-          <h3>話してみよう</h3>
-          <p class="talk">${esc(talk)}</p>
+          <div class="talk-box">
+            <h3>話してみよう</h3>
+            <p class="talk">${esc(talk)}</p>
+          </div>
 
           <fieldset class="score">
             <legend>${esc(guesser)}が当てた数</legend>
@@ -268,9 +349,13 @@
           </fieldset>
 
           <div class="next-wrap">
-            <button class="btn" id="next" ${S.hits == null ? "disabled" : ""}>${isLast ? "結果を見る" : "次のお題へ"}</button>
+            <button class="btn" id="to-list" ${S.hits == null ? "disabled" : ""}>次のお題を選ぶ</button>
+            <button class="btn outline" id="to-random" ${S.hits == null ? "disabled" : ""}>ランダムで次へ</button>
           </div>
-          <div class="redo"><button class="text-btn" id="redo">順位を選び直す</button></div>
+          <div class="redo">
+            <button class="text-btn" id="to-result" ${S.hits == null ? "disabled" : ""}>ここで終わって結果を見る</button>
+            <button class="text-btn" id="redo">順位を選び直す</button>
+          </div>
         </section>
       ` : ""}
     `;
@@ -289,36 +374,42 @@
       }, 480);
     });
 
+    if (!done) return;
+
+    const nav = ["#to-list", "#to-random", "#to-result"].map((s) => app.querySelector(s));
     app.querySelectorAll('input[name="hits"]').forEach((r) => {
       r.addEventListener("change", () => {
         S.hits = Number(r.value);
-        app.querySelector("#next").disabled = false;
+        nav.forEach((b) => { b.disabled = false; });
         save();
       });
     });
 
-    const next = app.querySelector("#next");
-    if (next) next.addEventListener("click", () => {
-      S.history[S.q] = { q: S.q, role, picks: S.picks.slice(), hits: S.hits };
-      S.history.length = S.q + 1;
-      if (isLast) return go("result");
-      S.q += 1;
-      S.picks = [];
-      S.revealed = 0;
-      S.hits = null;
-      go("question");
-    });
-    const redo = app.querySelector("#redo");
-    if (redo) redo.addEventListener("click", () => { S.revealed = 0; S.hits = null; go("question"); });
+    const record = () => {
+      S.history.push({ q: S.q, role, picks: S.picks.slice(), hits: S.hits });
+      Object.assign(S, { picks: [], revealed: 0, hits: null });
+    };
+    app.querySelector("#to-list").addEventListener("click", () => { record(); go("list"); });
+    app.querySelector("#to-random").addEventListener("click", () => { record(); randomQuestion(); });
+    app.querySelector("#to-result").addEventListener("click", () => { record(); go("result"); });
+    app.querySelector("#redo").addEventListener("click", () => { S.revealed = 0; S.hits = null; go("question"); });
   }
 
   function renderResult() {
-    const hist = S.history.filter(Boolean);
-    const total = hist.reduce((a, h) => a + (h.hits || 0), 0);
-    const max = hist.length * RANKS || 1;
+    const hist = S.history.filter((h) => Q[h.q]);
+    if (!hist.length) {
+      app.innerHTML = `
+        <header class="result-head"><h1>結果</h1><p class="count">まだ遊んだお題がありません</p></header>
+        <div class="result-actions"><button class="btn" id="pick">お題を選ぶ</button></div>`;
+      app.querySelector("#pick").addEventListener("click", () => go("list"));
+      return;
+    }
+    const sum = (arr) => arr.reduce((a, h) => a + (h.hits || 0), 0);
+    const total = sum(hist);
+    const max = hist.length * RANKS;
     const pct = Math.round((total / max) * 100);
-    const myHits = hist.filter((h) => h.role === "guess").reduce((a, h) => a + h.hits, 0);
-    const frHits = hist.filter((h) => h.role === "answer").reduce((a, h) => a + h.hits, 0);
+    const mine = hist.filter((h) => h.role === "guess");
+    const theirs = hist.filter((h) => h.role === "answer");
     const comment =
       pct >= 80 ? "ほとんど言わなくても伝わる2人です。" :
       pct >= 60 ? "かなりお互いのことが分かっています。" :
@@ -328,14 +419,14 @@
 
     app.innerHTML = `
       <header class="result-head">
-        <h1>結果</h1>
+        <h1>${hist.length}問の結果</h1>
         <p class="count">${max}個中 <b>${total}個</b> 当たり（${pct}%）</p>
         <p>${comment}</p>
       </header>
 
       <dl class="tally">
-        <div><dt>${esc(meName())}が当てた数</dt><dd>${myHits}</dd></div>
-        <div><dt>${esc(friendName())}が当てた数</dt><dd>${frHits}</dd></div>
+        <div><dt>${esc(meName())}が当てた数</dt><dd>${sum(mine)}<small> / ${mine.length * RANKS}</small></dd></div>
+        <div><dt>${esc(friendName())}が当てた数</dt><dd>${sum(theirs)}<small> / ${theirs.length * RANKS}</small></dd></div>
       </dl>
 
       <section class="section">
@@ -344,33 +435,32 @@
           ${hist.map((h) => {
             const item = Q[h.q];
             return `<li>
-              <div class="h-q">${esc(item.title)}</div>
+              <div class="h-q"><span class="h-no">No.${h.q + 1}</span>${esc(item.title)}</div>
               <div class="h-meta">${h.role === "answer" ? "自分の本音" : `${esc(friendName())}の予想`}／当たり ${h.hits}個</div>
-              <ol>${h.picks.map((p, r) => `<li><span class="sub">${r + 1}位</span>　${esc(item.options[p])}</li>`).join("")}</ol>
+              <ol>${h.picks.map((p, r) => `<li><span class="sub">${r + 1}位</span> ${esc(item.options[p])}</li>`).join("")}</ol>
             </li>`;
           }).join("")}
         </ul>
       </section>
 
       <div class="result-actions">
-        <button class="btn" id="swap">役を入れかえてもう一度</button>
-        <button class="btn outline" id="again">トップに戻る</button>
+        <button class="btn" id="more">続けて遊ぶ</button>
+        <button class="btn outline" id="reset">記録を消して最初から</button>
+        <div class="center"><button class="text-btn" id="home">トップに戻る</button></div>
       </div>
     `;
 
-    app.querySelector("#again").addEventListener("click", () => {
-      Object.assign(S, { q: 0, picks: [], revealed: 0, hits: null, history: [] });
+    app.querySelector("#more").addEventListener("click", () => go("list"));
+    app.querySelector("#home").addEventListener("click", () => go("home"));
+    app.querySelector("#reset").addEventListener("click", () => {
+      if (!window.confirm("これまでの記録を消します。よろしいですか？")) return;
+      Object.assign(S, { q: null, picks: [], revealed: 0, hits: null, history: [] });
       go("home");
-    });
-    app.querySelector("#swap").addEventListener("click", () => {
-      S.firstRole = S.firstRole === "answer" ? "guess" : "answer";
-      Object.assign(S, { q: 0, picks: [], revealed: 0, hits: null, history: [] });
-      go("question");
     });
   }
 
   if (!Q.length) { app.textContent = "お題がありません（questions.js を確認してください）"; return; }
-  if (S.screen !== "home" && !Q[S.q]) S = fresh();
+  if ((S.screen === "question" || S.screen === "reveal") && !Q[S.q]) S.screen = "list";
   if (S.screen === "reveal" && S.picks.length < RANKS) S.screen = "question";
   render();
 })();
