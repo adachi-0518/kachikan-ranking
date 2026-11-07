@@ -39,7 +39,9 @@
     picks: [],
     revealed: 0,
     hits: null,
-    history: []          // { q, role, picks, hits }
+    history: [],         // { q, role, picks, hits }
+    peer: null,          // 読み込んだ相手の回答 { name, entries, at }
+    pendingPeer: null
   });
 
   let S = load() || fresh();
@@ -90,6 +92,8 @@
     if (S.screen === "question" && Q[S.q]) return renderQuestion();
     if (S.screen === "reveal" && Q[S.q]) return renderReveal();
     if (S.screen === "result") return renderResult();
+    if (S.screen === "compare") return renderCompare();
+    if (S.screen === "import") return renderImport();
     return renderHome();
   }
 
@@ -152,6 +156,7 @@
         <button class="btn" id="pick">お題を選ぶ</button>
         <button class="btn outline" id="random">ランダムで1問</button>
         ${n ? `<div class="center"><button class="text-btn" id="result">これまでの結果（${n}問）</button></div>` : ""}
+        ${S.peer ? `<div class="center"><button class="text-btn" id="cmp">${esc(peerName())}の回答と見比べる</button></div>` : ""}
       </div>
     `;
 
@@ -166,6 +171,8 @@
     app.querySelector("#random").addEventListener("click", randomQuestion);
     const res = app.querySelector("#result");
     if (res) res.addEventListener("click", () => go("result"));
+    const cmp = app.querySelector("#cmp");
+    if (cmp) cmp.addEventListener("click", () => go("compare"));
   }
 
   function renderList() {
@@ -395,13 +402,159 @@
     app.querySelector("#redo").addEventListener("click", () => { S.revealed = 0; S.hits = null; go("question"); });
   }
 
+  // ---------- 回答コード（サーバーを使わずに回答を交換する） ----------
+  // 形式: "KR" + base64url( 版 | 名前の長さ | 名前(UTF-8) | 件数 | [お題, 役と当たり数, 順位2バイト]… | 検査用の合計 )
+  const CODE_PREFIX = "KR";
+
+  function utf8Cut(str, maxBytes) {
+    const enc = new TextEncoder();
+    let s = str;
+    while (enc.encode(s).length > maxBytes) s = s.slice(0, -1);
+    return enc.encode(s);
+  }
+  function toB64url(bytes) {
+    let bin = "";
+    bytes.forEach((b) => { bin += String.fromCharCode(b); });
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function fromB64url(s) {
+    const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
+    const bin = atob(b64);
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  }
+
+  function encodeCode() {
+    const entries = S.history.filter((h) => Q[h.q] && h.q < 256).slice(-255);
+    const name = utf8Cut(S.me.trim(), 30);
+    const bytes = [1, name.length, ...name, entries.length];
+    entries.forEach((h) => {
+      const p = (h.picks[0] & 7) | ((h.picks[1] & 7) << 3) | ((h.picks[2] & 7) << 6);
+      bytes.push(h.q, (h.role === "guess" ? 128 : 0) | ((h.hits & 3) << 5), p >> 8, p & 255);
+    });
+    bytes.push(bytes.reduce((a, b) => (a + b) & 255, 0));
+    return CODE_PREFIX + toB64url(bytes);
+  }
+
+  function decodeCode(input) {
+    let s = String(input || "").trim();
+    const m = s.match(/[#&?]c=([A-Za-z0-9_-]+)/);
+    if (m) s = m[1];
+    s = s.replace(/\s+/g, "");
+    if (!s.startsWith(CODE_PREFIX)) throw new Error("「KR」で始まるコードか、送られてきたリンクを貼り付けてください。");
+    let b;
+    try { b = fromB64url(s.slice(CODE_PREFIX.length)); } catch (e) { throw new Error("コードの文字が途中で欠けているようです。"); }
+    const body = b.slice(0, -1);
+    const sum = body.reduce((a, x) => (a + x) & 255, 0);
+    if (!b.length || sum !== b[b.length - 1]) throw new Error("コードの一部が欠けているか、まちがっています。最初から最後までコピーしてください。");
+    let i = 0;
+    if (body[i++] !== 1) throw new Error("このコードの形式には対応していません。");
+    const nl = body[i++];
+    const name = new TextDecoder().decode(body.slice(i, i + nl)); i += nl;
+    const n = body[i++];
+    const entries = [];
+    for (let k = 0; k < n; k++) {
+      const q = body[i++], rh = body[i++], p = (body[i++] << 8) | body[i++];
+      const picks = [p & 7, (p >> 3) & 7, (p >> 6) & 7];
+      if (!Q[q] || new Set(picks).size !== 3) continue; // 知らないお題は飛ばす
+      entries.push({ q, role: rh & 128 ? "guess" : "answer", hits: (rh >> 5) & 3, picks });
+    }
+    if (i !== body.length) throw new Error("コードの長さが合いません。最初から最後までコピーしてください。");
+    return { name, entries, at: Date.now() };
+  }
+
+  const shareLink = (code) => `${location.origin}${location.pathname}#c=${code}`;
+  const peerName = () => (S.peer && S.peer.name) || friendName();
+
+  // お題ごとの最新の記録
+  function latestByQ(list) {
+    const map = new Map();
+    list.forEach((h) => map.set(h.q, h));
+    return map;
+  }
+
+  function exchangeSection() {
+    const has = S.history.length > 0;
+    return `
+      <section class="section exchange" id="exchange">
+        <h2>回答を交換する</h2>
+        <p class="sub">回答をコードにして相手に送ります。サーバーには何も保存しません。お互いのコードを読み込むと、相手の回答と見比べられます。</p>
+
+        <h3>1. 自分のコードを送る</h3>
+        <button class="btn" id="share" ${has ? "" : "disabled"}>${has ? "コードを送る（LINEなど）" : "まだ送れる回答がありません"}</button>
+        ${has ? `
+          <details class="code-details">
+            <summary>コードを文字で見る</summary>
+            <textarea class="code-box" id="my-code" readonly rows="3">${encodeCode()}</textarea>
+            <button class="btn outline" id="copy">コードをコピー</button>
+          </details>` : ""}
+        <p class="note" id="share-note" role="status"></p>
+
+        <h3>2. 相手のコードを読み込む</h3>
+        <p class="sub small">送られてきたリンクを開くか、ここに貼り付けてください。</p>
+        <label class="visually-hidden" for="peer-code">相手のコード</label>
+        <textarea class="code-box" id="peer-code" rows="3" placeholder="KR から始まるコード、またはリンク"></textarea>
+        <p class="err" id="peer-err" role="alert"></p>
+        <button class="btn outline" id="load">読み込む</button>
+
+        ${S.peer ? `
+          <div class="peer-ready">
+            <p><b>${esc(peerName())}</b>の回答（${S.peer.entries.length}問）を読み込み済み</p>
+            <button class="btn" id="compare">${esc(peerName())}の回答と見比べる</button>
+          </div>` : ""}
+      </section>
+    `;
+  }
+
+  function bindExchange() {
+    const share = app.querySelector("#share");
+    const note = app.querySelector("#share-note");
+    const copyText = async (text, msg) => {
+      try { await navigator.clipboard.writeText(text); note.textContent = msg; }
+      catch (e) {
+        const box = app.querySelector("#my-code");
+        if (box) { box.closest("details").open = true; box.select(); }
+        note.textContent = "自動でコピーできませんでした。コードを長押ししてコピーしてください。";
+      }
+    };
+    if (share && !share.disabled) share.addEventListener("click", async () => {
+      const code = encodeCode();
+      const url = shareLink(code);
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: "価値観ランキング", text: `${meName()}の回答です。リンクを開くと見比べられます。`, url });
+          note.textContent = "送りました。相手のコードも送ってもらいましょう。";
+          return;
+        } catch (e) { if (e && e.name === "AbortError") return; }
+      }
+      copyText(url, "リンクをコピーしました。LINEなどに貼り付けて送ってください。");
+    });
+    const copy = app.querySelector("#copy");
+    if (copy) copy.addEventListener("click", () => copyText(encodeCode(), "コードをコピーしました。"));
+
+    app.querySelector("#load").addEventListener("click", () => {
+      const err = app.querySelector("#peer-err");
+      err.textContent = "";
+      try {
+        const peer = decodeCode(app.querySelector("#peer-code").value);
+        if (!peer.entries.length) throw new Error("このコードには回答が入っていません。");
+        S.peer = peer;
+        save();
+        go("compare");
+      } catch (e) { err.textContent = e.message; }
+    });
+    const cmp = app.querySelector("#compare");
+    if (cmp) cmp.addEventListener("click", () => go("compare"));
+  }
+
   function renderResult() {
     const hist = S.history.filter((h) => Q[h.q]);
     if (!hist.length) {
       app.innerHTML = `
         <header class="result-head"><h1>結果</h1><p class="count">まだ遊んだお題がありません</p></header>
-        <div class="result-actions"><button class="btn" id="pick">お題を選ぶ</button></div>`;
+        <div class="result-actions"><button class="btn" id="pick">お題を選ぶ</button></div>
+        ${exchangeSection()}`;
       app.querySelector("#pick").addEventListener("click", () => go("list"));
+      bindExchange();
       return;
     }
     const sum = (arr) => arr.reduce((a, h) => a + (h.hits || 0), 0);
@@ -417,6 +570,14 @@
       pct >= 20 ? "意外な答えが多かったようです。話すネタはたくさんあります。" :
       "予想がほとんど外れました。ここから知っていく2人です。";
 
+    // ジャンル別（カテゴリの並びは固定。多い順に並べ替えない）
+    const byCat = CATS.map((c) => {
+      const hs = hist.filter((h) => Q[h.q].cat === c);
+      const got = sum(hs), all = hs.length * RANKS;
+      return { c, n: hs.length, got, all, pct: all ? Math.round((got / all) * 100) : 0 };
+    }).filter((x) => x.n > 0);
+    const best = byCat.length > 1 ? byCat.reduce((a, b) => (b.pct > a.pct ? b : a)) : null;
+
     app.innerHTML = `
       <header class="result-head">
         <h1>${hist.length}問の結果</h1>
@@ -428,6 +589,20 @@
         <div><dt>${esc(meName())}が当てた数</dt><dd>${sum(mine)}<small> / ${mine.length * RANKS}</small></dd></div>
         <div><dt>${esc(friendName())}が当てた数</dt><dd>${sum(theirs)}<small> / ${theirs.length * RANKS}</small></dd></div>
       </dl>
+
+      <section class="section">
+        <h2>ジャンル別の当たり率</h2>
+        ${best ? `<p class="sub small cat-note">いちばん分かり合えているのは「${esc(best.c)}」です。</p>` : ""}
+        <ul class="cat-bars">
+          ${byCat.map((x) => `
+            <li>
+              <div class="cb-head"><span class="cb-name">${esc(x.c)}</span><span class="cb-val"><b>${x.pct}%</b>（${x.got}/${x.all}・${x.n}問）</span></div>
+              <div class="cb-track" role="img" aria-label="${esc(x.c)} ${x.pct}%"><span style="width:${x.pct}%"></span></div>
+            </li>`).join("")}
+        </ul>
+      </section>
+
+      ${exchangeSection()}
 
       <section class="section">
         <h2>${esc(meName())}がつけた順位</h2>
@@ -453,14 +628,126 @@
     app.querySelector("#more").addEventListener("click", () => go("list"));
     app.querySelector("#home").addEventListener("click", () => go("home"));
     app.querySelector("#reset").addEventListener("click", () => {
-      if (!window.confirm("これまでの記録を消します。よろしいですか？")) return;
-      Object.assign(S, { q: null, picks: [], revealed: 0, hits: null, history: [] });
+      if (!window.confirm("これまでの記録と読み込んだ相手の回答を消します。よろしいですか？")) return;
+      Object.assign(S, { q: null, picks: [], revealed: 0, hits: null, history: [], peer: null });
       go("home");
     });
+    bindExchange();
+  }
+
+  // ---------- 相手の回答と見比べる ----------
+  function renderCompare() {
+    if (!S.peer) return go("result");
+    const pn = peerName();
+    const mine = latestByQ(S.history.filter((h) => Q[h.q]));
+    const theirs = latestByQ(S.peer.entries);
+    const both = [...mine.keys()].filter((q) => theirs.has(q)).sort((a, b) => a - b);
+    const onlyMe = [...mine.keys()].filter((q) => !theirs.has(q)).length;
+    const onlyThem = [...theirs.keys()].filter((q) => !mine.has(q)).length;
+
+    // 役がちがうお題は自動で採点（予想が本音の3位以内に入った数／順位まで同じ数）
+    let meGot = 0, meAll = 0, thGot = 0, thAll = 0, exact = 0;
+    const rows = both.map((q) => {
+      const a = mine.get(q), b = theirs.get(q);
+      const inter = a.picks.filter((p) => b.picks.includes(p)).length;
+      const same = a.picks.filter((p, i) => b.picks[i] === p).length;
+      if (a.role !== b.role) {
+        exact += same;
+        if (a.role === "guess") { meGot += inter; meAll += 3; } else { thGot += inter; thAll += 3; }
+      }
+      return { q, a, b, inter, same };
+    });
+
+    const roleLabel = (h, who) => (h.role === "answer" ? `${who}の本音` : `${who}の予想`);
+    const col = (h, who, otherPicks) => `
+      <div class="cmp-col">
+        <div class="cmp-who">${esc(roleLabel(h, who))}</div>
+        <ol>${h.picks.map((p, i) => {
+          const hit = otherPicks.includes(p);
+          const same = otherPicks[i] === p;
+          return `<li class="${hit ? "hit" : ""}"><span class="r">${i + 1}位</span><span class="t">${esc(Q[h.q].options[p])}</span>${same ? `<span class="same">同じ順位</span>` : ""}</li>`;
+        }).join("")}</ol>
+      </div>`;
+
+    app.innerHTML = `
+      <div class="list-head">
+        <button class="text-btn" id="back">← 結果に戻る</button>
+        <h1>${esc(pn)}と見比べる</h1>
+        <p class="sub">2人とも遊んだお題 ${both.length}問。${onlyMe || onlyThem ? `片方だけのお題は${onlyMe + onlyThem}問あります。` : ""}</p>
+      </div>
+
+      ${meAll + thAll ? `
+        <dl class="tally">
+          <div><dt>${esc(meName())}の予想</dt><dd>${meGot}<small> / ${meAll}</small></dd></div>
+          <div><dt>${esc(pn)}の予想</dt><dd>${thGot}<small> / ${thAll}</small></dd></div>
+        </dl>
+        <p class="sub small auto-note">回答どうしを照らし合わせて自動で数えています。順位までぴったり同じだったのは${exact}個。</p>
+      ` : ""}
+
+      ${rows.length ? `<ul class="cmp-list">
+        ${rows.map(({ q, a, b, inter }) => `
+          <li class="cmp">
+            <div class="cmp-q"><span class="h-no">No.${q + 1}</span>${esc(Q[q].title)}</div>
+            <div class="cmp-sum">${a.role === b.role
+              ? `2人とも${a.role === "answer" ? "本音" : "予想"}。共通は${inter}個`
+              : `${inter}個 当たり`}</div>
+            <div class="cmp-cols">
+              ${col(a, meName(), b.picks)}
+              ${col(b, pn, a.picks)}
+            </div>
+          </li>`).join("")}
+      </ul>` : `<p class="section">同じお題をまだ遊んでいません。同じ番号のお題を遊んでから、もう一度コードを交換してください。</p>`}
+
+      <div class="result-actions">
+        <button class="btn outline" id="back2">結果に戻る</button>
+      </div>
+    `;
+    app.querySelector("#back").addEventListener("click", () => go("result"));
+    app.querySelector("#back2").addEventListener("click", () => go("result"));
+  }
+
+  // リンクで開いたとき（#c=…）の確認画面
+  function renderImport() {
+    const p = S.pendingPeer;
+    if (!p) return go("home");
+    app.innerHTML = `
+      <header class="result-head">
+        <h1>回答コード</h1>
+        <p class="count">${esc(p.name || "相手")}の回答（${p.entries.length}問）</p>
+        <p>読み込むと、自分の回答と見比べられます。この端末の中だけに保存されます。</p>
+      </header>
+      ${p.name ? "" : `
+        <section class="section">
+          <label class="input-label" for="pname">相手の名前</label>
+          <input class="input" id="pname" maxlength="10" placeholder="相手" value="${esc(S.friend)}">
+        </section>`}
+      <div class="result-actions">
+        <button class="btn" id="ok">読み込む</button>
+        <button class="btn outline" id="cancel">やめる</button>
+      </div>
+    `;
+    app.querySelector("#ok").addEventListener("click", () => {
+      const nm = app.querySelector("#pname");
+      if (nm && nm.value.trim()) p.name = nm.value.trim();
+      S.peer = p;
+      if (!S.friend.trim() && p.name) S.friend = p.name;
+      S.pendingPeer = null;
+      go("compare");
+    });
+    app.querySelector("#cancel").addEventListener("click", () => { S.pendingPeer = null; go("home"); });
   }
 
   if (!Q.length) { app.textContent = "お題がありません（questions.js を確認してください）"; return; }
   if ((S.screen === "question" || S.screen === "reveal") && !Q[S.q]) S.screen = "list";
   if (S.screen === "reveal" && S.picks.length < RANKS) S.screen = "question";
+  if (/[#&]c=/.test(location.hash)) {
+    try {
+      S.pendingPeer = decodeCode(location.hash);
+      S.screen = "import";
+    } catch (e) {
+      window.alert("リンクのコードを読み込めませんでした。" + e.message);
+    }
+    try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+  }
   render();
 })();

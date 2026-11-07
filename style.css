@@ -362,6 +362,61 @@ p { margin: 0; }
 
 .result-actions { margin-top: 20px; }
 
+/* ---------- ジャンル別 ---------- */
+.cat-note { margin: -4px 0 12px; }
+.cat-bars { list-style: none; margin: 0; padding: 0; }
+.cat-bars li + li { margin-top: 14px; }
+.cb-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.cb-name { font-weight: 700; }
+.cb-val { font-size: 14px; color: var(--text-sub); white-space: nowrap; }
+.cb-val b { font-size: 18px; color: var(--text); }
+.cb-track { height: 10px; background: var(--gray-50); border-radius: 5px; margin-top: 6px; overflow: hidden; }
+.cb-track span { display: block; height: 100%; min-width: 4px; background: var(--primary); border-radius: 5px; }
+
+/* ---------- 回答の交換 ---------- */
+.small { font-size: 14px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.exchange > .sub { margin-bottom: 16px; }
+.exchange h3 { font-size: 17px; margin: 20px 0 8px; }
+.exchange h3:first-of-type { margin-top: 0; }
+.code-details { margin-top: 8px; }
+.code-details summary { cursor: pointer; color: var(--primary); text-decoration: underline; text-underline-offset: 3px; min-height: 44px; display: flex; align-items: center; }
+.code-box {
+  display: block; width: 100%; margin: 8px 0;
+  padding: 12px; border: 1px solid var(--gray-600); border-radius: var(--r-btn);
+  font: 15px/1.5 "Noto Sans Mono", ui-monospace, Menlo, monospace; letter-spacing: 0;
+  word-break: break-all; resize: vertical; background: var(--white);
+}
+.code-box[readonly] { background: var(--gray-50); border-color: var(--gray-200); }
+.note { color: var(--primary); font-weight: 700; margin-top: 8px; min-height: 0; }
+.note:empty, .err:empty { display: none; }
+.err { color: #ce0000; font-weight: 700; margin: 4px 0 8px; }
+.peer-ready { margin-top: 20px; padding: 16px; background: var(--blue-50); border-radius: 12px; }
+.peer-ready p { margin-bottom: 12px; }
+
+/* ---------- 見比べる ---------- */
+.auto-note { margin: 8px 4px 0; }
+.cmp-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.cmp { background: var(--white); border-radius: var(--r-card); padding: 16px; }
+.cmp + .cmp { margin-top: 10px; }
+.cmp-q { font-weight: 700; line-height: 1.5; }
+.cmp-q .h-no { color: var(--primary); margin-right: 8px; font-size: 14px; }
+.cmp-sum { font-size: 14px; color: var(--text-sub); margin-top: 2px; }
+.cmp-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.cmp-who { font-size: 13px; font-weight: 700; color: var(--text-sub); margin-bottom: 6px; }
+.cmp-col ol { list-style: none; margin: 0; padding: 0; }
+.cmp-col li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px;
+  padding: 6px 8px; border-radius: 8px; background: var(--gray-50); font-size: 15px; line-height: 1.4;
+}
+.cmp-col li + li { margin-top: 4px; }
+.cmp-col .r { color: var(--text-sub); font-size: 13px; font-weight: 700; flex: none; }
+.cmp-col .t { word-break: auto-phrase; }
+.cmp-col li.hit { background: var(--blue-50); box-shadow: inset 0 0 0 1px var(--blue-300); }
+.cmp-col li.hit .t { font-weight: 700; }
+.cmp-col li.hit .r { color: var(--primary); }
+.cmp-col .same { flex-basis: 100%; font-size: 12px; font-weight: 700; color: var(--primary); }
+
 @media (prefers-reduced-motion: reduce) {
   .flip .inner { transition: none; }
 }
